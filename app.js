@@ -4,6 +4,10 @@
 var baseurl = process.env.SUBFOLDER || '/';
 var app = require('express')();
 var { DownloaderHelper } = require('node-downloader-helper');
+const { HttpProxyAgent } = require('http-proxy-agent');
+const { HttpsProxyAgent } = require('https-proxy-agent');
+var parseUrl = require('url').parse;
+var getProxyForUrl = require('proxy-from-env').getProxyForUrl;
 var exec = require('child_process').exec;
 var express = require('express');
 var fs = require('fs');
@@ -34,6 +38,49 @@ function disablesigs(){
   }
 }
 
+function getProxyAgentFromUrl(request_url) {
+  const httpProxyUrl = process.env.http_proxy || process.env.HTTP_PROXY;
+  const httpsProxyUrl = process.env.https_proxy || process.env.HTTPS_PROXY;
+  var httpRequestAgentOptions = {};
+  var httpsRequestAgentOptions = {};
+  var proxyAgentUrl = getProxyForUrl(request_url);
+  console.debug('getting proxy agent for: ' + request_url);
+  if(proxyAgentUrl) {
+    var parsed_proxy_url = parseUrl(proxyAgentUrl);
+    console.debug('Using proxy agent: ' + proxyAgentUrl + ' parsed: ' + parsed_proxy_url.protocol);
+    if(parsed_proxy_url.protocol == 'http:' || parsed_proxy_url.protocol == 'https:') {
+      httpRequestAgentOptions = {agent:new HttpProxyAgent(httpProxyUrl)};
+      httpsRequestAgentOptions = {agent:new HttpsProxyAgent(httpsProxyUrl)};
+    }
+  }
+  return {
+    override:true,retry:{maxRetries:2,delay:5000},
+    httpRequestOptions:httpRequestAgentOptions,
+    httpsRequestOptions:httpsRequestAgentOptions
+  }
+}
+
+function getParsedProxyOptions(request_url) {
+  const httpProxyUrl = process.env.http_proxy || process.env.HTTP_PROXY;
+  const httpsProxyUrl = process.env.https_proxy || process.env.HTTPS_PROXY;
+  console.debug('getting proxy options for: ' + request_url);
+  var proxy_url = getProxyForUrl(request_url);
+  if(proxy_url) {
+    var parsed_request_url = parseUrl(request_url);
+    var parsed_proxy_url = parseUrl(proxy_url);
+    console.debug('Using proxy options: ' + proxy_url + ' with: ' + parsed_request_url.protocol);
+    return {
+      agent:new HttpsProxyAgent(httpsProxyUrl),
+      headers:{'user-agent':'node.js'}
+    };
+  } else {
+    console.debug('Using no proxy.');
+    return {
+      headers:{'user-agent':'node.js'}
+    }
+  }
+}
+
 ////// PATHS //////
 //// Main ////
 baserouter.get("/", function (req, res) {
@@ -60,9 +107,10 @@ io.on('connection', function(socket){
     var tftpcmd = '/usr/sbin/dnsmasq --version | head -n1';
     var nginxcmd = '/usr/sbin/nginx -v';
     var dashinfo = {};
+    const fetch_uri = 'https://api.github.com/repos/netbootxyz/netboot.xyz/releases/latest';
     dashinfo['webversion'] = version;
     dashinfo['menuversion'] = fs.readFileSync('/config/menuversion.txt', 'utf8');
-    fetch('https://api.github.com/repos/netbootxyz/netboot.xyz/releases/latest', {headers: {'user-agent': 'node.js'}})
+    fetch(fetch_uri, getParsedProxyOptions(fetch_uri))
       .then(response => {
         if (!response.ok) {
           throw new Error(`HTTP error! status: ${response.status}`);
@@ -185,8 +233,8 @@ io.on('connection', function(socket){
   });
   // When Dev Browser is requested reach out to github for versions
   socket.on('devgetbrowser', async function(){
-    var api_url = 'https://api.github.com/repos/netbootxyz/netboot.xyz/';
-    var options = {headers: {'user-agent': 'node.js'}};
+    const api_url = 'https://api.github.com/repos/netbootxyz/netboot.xyz/';
+    var options = getParsedProxyOptions(api_url);
     var releasesResponse = await fetch(api_url + 'releases', options);
     if (!releasesResponse.ok) {
       throw new Error(`HTTP error! status: ${releasesResponse.status}`);
@@ -251,7 +299,7 @@ async function upgrademenu(version, callback){
   }
   for (var i in rom_files){
     var file = rom_files[i];
-    var url = download_endpoint + file;    
+    var url = download_endpoint + file;
     downloads.push({'url':url,'path':remote_folder});
   }
   // static config for endpoints
@@ -295,7 +343,7 @@ async function downloader(downloads){
     var value = downloads[i];
     var url = value.url;
     var path = value.path;
-    var dloptions = {override:true,retry:{maxRetries:2,delay:5000}};
+    var dloptions = getProxyAgentFromUrl(url);
     var dl = new DownloaderHelper(url, path, dloptions);
 
     dl.on('end', function(){ 
